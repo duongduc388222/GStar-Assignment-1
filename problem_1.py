@@ -11,15 +11,15 @@ class FlashAttention2Function(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False):
         # Get dimensions from input tensors following the (B, H, N, D) convention
-        B, H, N_Q, D_H = Q.shape
+        B, H, N_Q, D_H = Q.shape # N_Q = N_K = 300, D_H = 64
         _, _, N_K, _ = K.shape
 
         # Define tile sizes
         Q_TILE_SIZE = 128
         K_TILE_SIZE = 128
         
-        N_Q_tiles = math.ceil(N_Q / Q_TILE_SIZE)
-        N_K_tiles = math.ceil(N_K / K_TILE_SIZE)
+        N_Q_tiles = math.ceil(N_Q / Q_TILE_SIZE) # N_Q_tiles = N_K_tiles = 3
+        N_K_tiles = math.ceil(N_K / K_TILE_SIZE) 
 
         # Initialize final output tensors
         O_final = torch.zeros_like(Q, dtype=Q.dtype)
@@ -38,7 +38,7 @@ class FlashAttention2Function(torch.autograd.Function):
                 for i in range(N_Q_tiles):
                     q_start = i * Q_TILE_SIZE
                     q_end = min((i + 1) * Q_TILE_SIZE, N_Q)
-                    Q_tile = Q_bh[q_start:q_end, :]
+                    Q_tile = Q_bh[q_start:q_end, :] 
 
                     # Initialize accumulators for this query tile
                     o_i = torch.zeros_like(Q_tile, dtype=Q.dtype)
@@ -50,24 +50,42 @@ class FlashAttention2Function(torch.autograd.Function):
                         k_start = j * K_TILE_SIZE
                         k_end = min((j + 1) * K_TILE_SIZE, N_K)
 
-                        K_tile = K_bh[k_start:k_end, :]
-                        V_tile = V_bh[k_start:k_end, :]
+                        K_tile = K_bh[k_start:k_end, :] 
+                        V_tile = V_bh[k_start:k_end, :] 
                         
-                        S_ij = (Q_tile @ K_tile.transpose(-1, -2)) * scale
+                        S_ij = (Q_tile @ K_tile.transpose(-1, -2)) * scale 
                         
                         # --- STUDENT IMPLEMENTATION REQUIRED HERE ---
                         # 1. Apply causal masking if is_causal is True.
-                        #
-                        # 2. Compute the new running maximum
-                        #
-                        # 3. Rescale the previous accumulators (o_i, l_i)
-                        #
-                        # 4. Compute the probabilities for the current tile, P_tilde_ij = exp(S_ij - m_new).
-                        #
-                        # 5. Accumulate the current tile's contribution to the accumulators to update l_i and o_i
-                        #
-                        # 6. Update the running max for the next iteration
                         
+                        if is_causal: 
+                            # Generate row and column indices 
+                            row_idx = torch.arange(q_start, q_end, device = Q.device).view(-1, 1)  
+                            col_idx = torch.arange(k_start, k_end, device = Q.device).view(1, -1)  
+
+                            # Apply the causal mask 
+                            causal_mask = row_idx >= col_idx
+                            S_ij = torch.where(causal_mask, S_ij, float("-inf"))
+                            
+                        # 2. Compute the new running maximum
+                        m_new = S_ij.amax(dim = 1, keepdim = False)
+                        m_new = torch.maximum(m_new, m_i)
+                        
+                        # 3. Rescale the previous accumulators (o_i, l_i)
+                        alpha = torch.exp(m_i - m_new)
+                        l_i = l_i * alpha
+                        o_i = o_i * alpha.unsqueeze(-1)
+
+                        # 4. Compute the probabilities for the current tile, P_tilde_ij = exp(S_ij - m_new).
+                        P_tilde_ij = torch.exp(S_ij.to(torch.float32) - m_new.unsqueeze(-1))
+
+                        # 5. Accumulate the current tile's contribution to the accumulators to update l_i and o_i
+                        l_i = l_i + P_tilde_ij.sum(dim=-1)
+                        o_i = o_i + P_tilde_ij @ V_tile.to(torch.float32)
+
+                        # 6. Update the running max for the next iteration
+                        m_i = m_new
+
                         # --- END OF STUDENT IMPLEMENTATION ---
 
                     # After iterating through all key tiles, normalize the output
