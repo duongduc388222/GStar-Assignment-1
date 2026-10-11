@@ -36,7 +36,8 @@ def _flash_attention_forward_gqa_kernel(
     # 1. Calculate how many query heads are in each group.
     # 2. Use integer division to find the correct kv_head_idx.
     
-    kv_head_idx = 0 # Placeholder: Replace with your calculation
+    num_groups = N_Q_HEADS // N_KV_HEADS
+    kv_head_idx = q_head_idx // num_groups # Placeholder: Replace with your calculation
     # --- END OF STUDENT IMPLEMENTATION ---
 
 
@@ -59,7 +60,25 @@ def _flash_attention_forward_gqa_kernel(
         # 1. Modify the pointer arithmetic for K and V to use your `kv_head_idx`.
         # 2. Reuse your working implementation for the online softmax update
         #    from your solution to Problem 4.
-        pass
+        k_offsets = start_n + tl.arange(0, BLOCK_N)
+        k_ptrs = K_ptr + batch_idx * k_stride_b + kv_head_idx * k_stride_h + \
+                 (k_offsets[None, :] * k_stride_s + tl.arange(0, HEAD_DIM)[:, None])
+        k_block = tl.load(k_ptrs, mask=k_offsets[None, :] < SEQ_LEN, other=0.0)
+        v_ptrs = V_ptr + batch_idx * v_stride_b + kv_head_idx * v_stride_h + \
+                 (k_offsets[:, None] * v_stride_s + tl.arange(0, HEAD_DIM)[None, :])
+        v_block = tl.load(v_ptrs, mask=k_offsets[:, None] < SEQ_LEN, other=0.0)
+
+        s_ij = tl.dot(q_block, k_block)
+        s_ij *= qk_scale
+
+        m_new = tl.maximum(m_i, tl.max(s_ij, axis=1))
+        alpha = tl.exp2(m_i - m_new)
+        acc = acc * alpha[:, None]
+        l_i = l_i * alpha
+        p_ij = tl.exp2(s_ij - m_new[:, None])
+        acc += tl.dot(p_ij.to(v_block.dtype), v_block)
+        l_i += tl.sum(p_ij, axis=1)
+        m_i = m_new
         # --- END OF STUDENT IMPLEMENTATION ---
 
     # --- Phase 2: Diagonal Blocks ---
@@ -69,7 +88,27 @@ def _flash_attention_forward_gqa_kernel(
         # 1. Modify the pointer arithmetic for K and V to use your `kv_head_idx`.
         # 2. Reuse your working implementation for the masked online softmax
         #    update from your solution to Problem 4.
-        pass
+        k_offsets = start_n + tl.arange(0, BLOCK_N)
+        k_ptrs = K_ptr + batch_idx * k_stride_b + kv_head_idx * k_stride_h + \
+                 (k_offsets[None, :] * k_stride_s + tl.arange(0, HEAD_DIM)[:, None])
+        k_block = tl.load(k_ptrs, mask=k_offsets[None, :] < SEQ_LEN, other=0.0)
+        v_ptrs = V_ptr + batch_idx * v_stride_b + kv_head_idx * v_stride_h + \
+                 (k_offsets[:, None] * v_stride_s + tl.arange(0, HEAD_DIM)[None, :])
+        v_block = tl.load(v_ptrs, mask=k_offsets[:, None] < SEQ_LEN, other=0.0)
+
+        s_ij = tl.dot(q_block, k_block)
+        s_ij *= qk_scale
+        causal_mask = (q_offsets[:, None] >= k_offsets[None, :]) & (k_offsets[None, :] < SEQ_LEN)
+        s_ij = tl.where(causal_mask, s_ij, -float('inf'))
+
+        m_new = tl.maximum(m_i, tl.max(s_ij, axis=1))
+        alpha = tl.exp2(m_i - m_new)
+        acc = acc * alpha[:, None]
+        l_i = l_i * alpha
+        p_ij = tl.exp2(s_ij - m_new[:, None])
+        acc += tl.dot(p_ij.to(v_block.dtype), v_block)
+        l_i += tl.sum(p_ij, axis=1)
+        m_i = m_new
         # --- END OF STUDENT IMPLEMENTATION ---
 
     # 4. Normalize and write the final output block.
