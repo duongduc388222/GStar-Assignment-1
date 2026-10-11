@@ -69,7 +69,15 @@ def _flash_attention_forward_kernel(
         # 4. Update the accumulator `acc` using `p_ij` and `v_block`.
         # 5. Update the denominator `l_i`.
         # 6. Update the running maximum `m_i` for the next iteration.
-        pass
+        s_ij = tl.where(k_offsets[None, :] < SEQ_LEN, s_ij, -float('inf'))
+        m_new = tl.maximum(m_i, tl.max(s_ij, axis=1))
+        alpha = tl.exp2(m_i - m_new)
+        acc = acc * alpha[:, None]
+        l_i = l_i * alpha
+        p_ij = tl.exp2(s_ij - m_new[:, None])
+        acc += tl.dot(p_ij.to(v_block.dtype), v_block)
+        l_i += tl.sum(p_ij, axis=1)
+        m_i = m_new
         # --- END OF STUDENT IMPLEMENTATION ---
 
 
