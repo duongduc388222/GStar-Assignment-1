@@ -48,7 +48,7 @@ def weighted_row_sum_kernel(
         w_chunk = tl.load(W_ptr + col_offsets, mask=mask, other=0.0)
         
         # - Compute the element-wise product and add it to the accumulator.
-        accumulator += x_chunk.to(tl.float32) * w_chunk.to(tl.float32)
+        accumulator += x_chunk * w_chunk
         
     # 6. Reduce the block-sized accumulator to a single scalar value after the loop.
     #    Hint: Use tl.sum().
